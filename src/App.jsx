@@ -1,7 +1,7 @@
 import { useState, useMemo } from "react";
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
-  ResponsiveContainer, Area, AreaChart, ReferenceLine, LineChart, Line, Cell
+  ResponsiveContainer, Area, AreaChart, ReferenceLine, LineChart, Line
 } from "recharts";
 
 const fmt = (v) => new Intl.NumberFormat("de-AT", { style: "currency", currency: "EUR", maximumFractionDigits: 0 }).format(v);
@@ -12,14 +12,12 @@ const fmtShort = (v) => {
 };
 const pct = (v) => `${(v * 100).toFixed(1)}%`;
 
-// Default cost structure (% of revenue)
 const defaultCostPct = {
   hilfsstoffe: 0.1,
   wareneinkauf: 0.34,
   verbrauchsmaterial: 3.8,
   fremdleistungen: 4.8,
   gehaelter: 14.17,
-  fremdpersonal: 19.77,
   sonderzahlungen: 2.6,
   sozialabgaben: 4.0,
   softwareWartung: 3.0,
@@ -33,7 +31,6 @@ const costLabels = {
   verbrauchsmaterial: "Verbrauchs- u. Hilfsmaterial",
   fremdleistungen: "Fremdleistungen",
   gehaelter: "Gehälter",
-  fremdpersonal: "Fremdpersonal (Zukauf)",
   sonderzahlungen: "Sonderzahlungen",
   sozialabgaben: "Sozialabgaben",
   softwareWartung: "Software & Wartung",
@@ -41,15 +38,26 @@ const costLabels = {
   sonstigeKosten: "Sonstige Kosten",
 };
 
+// These cost categories scale only with core revenue in Scenario B
+const coreOnlyCosts = new Set([
+  "strom", "sonderzahlungen", "gehaelter",
+  "fremdleistungen", "softwareWartung", "sozialabgaben"
+]);
+
 const defaultParams = {
-  scansPerHour: 4,
-  revenuePerScan: 185,
   operatingStart: 7,
   operatingEnd: 17,
   daysPerWeek: 5,
   weeksPerYear: 48,
+  // Scenario A
   scenarioA_extraHours: 0,
+  scenarioA_scansPerHour: 5,
+  scenarioA_revenuePerScan: 170,
+  // Scenario B
   scenarioB_extraHours: 10,
+  scenarioB_scansPerHour: 5,
+  scenarioB_revenuePerScan: 170,
+  scenarioB_fremdpersonalPerHour: 120,
 };
 
 const InputField = ({ label, value, onChange, suffix, tooltip, min, step = 1, type = "number" }) => (
@@ -71,9 +79,12 @@ const InputField = ({ label, value, onChange, suffix, tooltip, min, step = 1, ty
   </div>
 );
 
-const CostRow = ({ label, value, onChange }) => (
+const CostRow = ({ label, value, onChange, coreOnly }) => (
   <div className="flex items-center gap-2 py-1 border-b border-gray-50">
-    <span className="flex-1 text-xs text-gray-600">{label}</span>
+    <span className="flex-1 text-xs text-gray-600">
+      {label}
+      {coreOnly && <span className="ml-1 text-[9px] text-amber-500" title="In Szenario B nur auf Kernbetrieb-Umsatz berechnet">&#9679;</span>}
+    </span>
     <input
       type="number"
       value={value}
@@ -109,51 +120,68 @@ export default function RadiologySimulator() {
   const [params, setParams] = useState(defaultParams);
   const [costs, setCosts] = useState(defaultCostPct);
   const [activeTab, setActiveTab] = useState("overview");
+  const [viewMode, setViewMode] = useState("monthly"); // "monthly" | "yearly"
 
   const up = (key) => (val) => setParams((p) => ({ ...p, [key]: val }));
   const uc = (key) => (val) => setCosts((c) => ({ ...c, [key]: val }));
 
+  const isYearly = viewMode === "yearly";
+  const periodLabel = isYearly ? "Jahr" : "Monat";
+  const periodMult = isYearly ? 12 : 1;
+
   const calc = useMemo(() => {
     const {
-      scansPerHour, revenuePerScan, operatingStart, operatingEnd,
-      daysPerWeek, weeksPerYear, scenarioA_extraHours, scenarioB_extraHours
+      operatingStart, operatingEnd, daysPerWeek, weeksPerYear,
+      scenarioA_extraHours, scenarioA_scansPerHour, scenarioA_revenuePerScan,
+      scenarioB_extraHours, scenarioB_scansPerHour, scenarioB_revenuePerScan,
+      scenarioB_fremdpersonalPerHour,
     } = params;
 
     const coreHoursPerDay = Math.max(0, operatingEnd - operatingStart);
     const coreHoursPerWeek = coreHoursPerDay * daysPerWeek;
     const weeksPerMonth = weeksPerYear / 12;
 
-    // Cost percentages
-    const totalCostPctWithFremd = Object.values(costs).reduce((s, v) => s + v, 0);
-    const totalCostPctWithoutFremd = totalCostPctWithFremd - costs.fremdpersonal;
-
-    const calcScenario = (extraHoursPerWeek, includeFremdpersonal) => {
+    const calcScenario = (extraHoursPerWeek, scansPerHour, revenuePerScan, isScenarioB) => {
       const totalHoursWeek = coreHoursPerWeek + extraHoursPerWeek;
       const totalHoursMonth = totalHoursWeek * weeksPerMonth;
       const totalHoursYear = totalHoursWeek * weeksPerYear;
+
+      const coreHoursMonth = coreHoursPerWeek * weeksPerMonth;
+      const extraHoursMonth = extraHoursPerWeek * weeksPerMonth;
 
       const scansWeek = totalHoursWeek * scansPerHour;
       const scansMonth = scansWeek * weeksPerMonth;
       const scansYear = scansWeek * weeksPerYear;
 
+      const coreRevenueMonth = coreHoursMonth * scansPerHour * revenuePerScan;
+      const totalRevenueMonth = scansMonth * revenuePerScan;
       const revenueWeek = scansWeek * revenuePerScan;
-      const revenueMonth = scansMonth * revenuePerScan;
+      const revenueMonth = totalRevenueMonth;
       const revenueYear = scansYear * revenuePerScan;
 
-      const costPct = includeFremdpersonal ? totalCostPctWithFremd : totalCostPctWithoutFremd;
-
-      // Individual cost items
+      // Cost calculation
       const costBreakdown = {};
       let totalCostsMonth = 0;
+
       for (const [key, pctVal] of Object.entries(costs)) {
-        if (!includeFremdpersonal && key === "fremdpersonal") {
-          costBreakdown[key] = 0;
-          continue;
+        let val;
+        if (isScenarioB && coreOnlyCosts.has(key)) {
+          // In Scenario B, these costs only scale with core revenue
+          val = coreRevenueMonth * (pctVal / 100);
+        } else {
+          val = totalRevenueMonth * (pctVal / 100);
         }
-        const val = revenueMonth * (pctVal / 100);
         costBreakdown[key] = val;
         totalCostsMonth += val;
       }
+
+      // Fremdpersonal costs (hourly rate for extra hours in Scenario B)
+      let fremdpersonalCosts = 0;
+      if (isScenarioB) {
+        fremdpersonalCosts = extraHoursMonth * scenarioB_fremdpersonalPerHour;
+        totalCostsMonth += fremdpersonalCosts;
+      }
+      costBreakdown.fremdpersonal = fremdpersonalCosts;
 
       const totalCostsWeek = totalCostsMonth / weeksPerMonth;
       const totalCostsYear = totalCostsMonth * 12;
@@ -169,39 +197,43 @@ export default function RadiologySimulator() {
       const costPerHour = totalCostsMonth / (totalHoursMonth || 1);
       const profitPerHour = profitMonth / (totalHoursMonth || 1);
 
+      const totalCostPct = revenueMonth > 0 ? (totalCostsMonth / revenueMonth) * 100 : 0;
+
       return {
         totalHoursWeek, totalHoursMonth, totalHoursYear,
         scansWeek, scansMonth, scansYear,
         revenueWeek, revenueMonth, revenueYear,
+        coreRevenueMonth,
         totalCostsWeek, totalCostsMonth, totalCostsYear,
+        fremdpersonalCosts,
         profitWeek, profitMonth, profitYear,
-        margin, costPct, costBreakdown,
+        margin, costPct: totalCostPct, costBreakdown,
         costPerScan, profitPerScan,
         revenuePerHour, costPerHour, profitPerHour,
       };
     };
 
-    // Scenario A: Kernbetrieb OHNE Zukauf (nur eigene Stunden + evtl. extra)
-    const scenA = calcScenario(scenarioA_extraHours, false);
-    // Scenario B: MIT Zukauf/Fremdpersonal (erweiterte Stunden)
-    const scenB = calcScenario(scenarioB_extraHours, true);
+    const scenA = calcScenario(scenarioA_extraHours, scenarioA_scansPerHour, scenarioA_revenuePerScan, false);
+    const scenB = calcScenario(scenarioB_extraHours, scenarioB_scansPerHour, scenarioB_revenuePerScan, true);
 
-    // Difference
     const diff = {
       scansMonth: scenB.scansMonth - scenA.scansMonth,
       revenueMonth: scenB.revenueMonth - scenA.revenueMonth,
       costsMonth: scenB.totalCostsMonth - scenA.totalCostsMonth,
       profitMonth: scenB.profitMonth - scenA.profitMonth,
+      scansYear: scenB.scansYear - scenA.scansYear,
       revenueYear: scenB.revenueYear - scenA.revenueYear,
+      costsYear: scenB.totalCostsYear - scenA.totalCostsYear,
       profitYear: scenB.profitYear - scenA.profitYear,
     };
 
-    // Monthly comparison data
     const monthNames = ["Jan", "Feb", "Mär", "Apr", "Mai", "Jun", "Jul", "Aug", "Sep", "Okt", "Nov", "Dez"];
     const monthlyData = monthNames.map((m, i) => ({
       monat: m,
       umsatzA: Math.round(scenA.revenueMonth),
       umsatzB: Math.round(scenB.revenueMonth),
+      kostenA: Math.round(scenA.totalCostsMonth),
+      kostenB: Math.round(scenB.totalCostsMonth),
       gewinnA: Math.round(scenA.profitMonth),
       gewinnB: Math.round(scenB.profitMonth),
       cumGewinnA: Math.round(scenA.profitMonth * (i + 1)),
@@ -209,19 +241,19 @@ export default function RadiologySimulator() {
       cumDiff: Math.round(diff.profitMonth * (i + 1)),
     }));
 
-    // Cost breakdown comparison
-    const costCompData = Object.entries(costLabels).map(([key, label]) => ({
-      name: label.length > 20 ? label.substring(0, 18) + "…" : label,
-      fullName: label,
+    const allCostKeys = [...Object.keys(costLabels), "fremdpersonal"];
+    const allCostLabels = { ...costLabels, fremdpersonal: "Fremdpersonal (Zukauf)" };
+    const costCompData = allCostKeys.map((key) => ({
+      name: (allCostLabels[key] || key).length > 20 ? (allCostLabels[key] || key).substring(0, 18) + "…" : (allCostLabels[key] || key),
+      fullName: allCostLabels[key] || key,
       szenarioA: Math.round(scenA.costBreakdown[key] || 0),
       szenarioB: Math.round(scenB.costBreakdown[key] || 0),
     }));
 
-    // Hours sensitivity
     const sensitivityData = Array.from({ length: 11 }, (_, i) => {
       const extra = i * 5;
-      const withFremd = calcScenario(extra, true);
-      const withoutFremd = calcScenario(extra, false);
+      const withFremd = calcScenario(extra, scenarioB_scansPerHour, scenarioB_revenuePerScan, true);
+      const withoutFremd = calcScenario(extra, scenarioA_scansPerHour, scenarioA_revenuePerScan, false);
       return {
         extraStunden: extra,
         gewinnMitZukauf: Math.round(withFremd.profitMonth),
@@ -229,7 +261,7 @@ export default function RadiologySimulator() {
       };
     });
 
-    return { scenA, scenB, diff, monthlyData, costCompData, sensitivityData, coreHoursPerDay, coreHoursPerWeek, weeksPerMonth };
+    return { scenA, scenB, diff, monthlyData, costCompData, sensitivityData, coreHoursPerDay, coreHoursPerWeek, weeksPerMonth, allCostLabels };
   }, [params, costs]);
 
   const tabs = [
@@ -245,7 +277,7 @@ export default function RadiologySimulator() {
         {/* Header */}
         <div className="bg-gradient-to-r from-blue-700 to-indigo-800 rounded-2xl p-5 mb-5 text-white">
           <h1 className="text-xl font-bold mb-1">Radiologie Scan-Simulator — Szenario-Vergleich</h1>
-          <p className="text-blue-200 text-xs">Vergleichsrechner für gemittelte Kostenanteile bei unterschiedlichen Betriebsstunden. Stellt nicht die tatsächliche Marge dar (ohne Leasing-, Finanzierungs- und Zinsaufwendungen).</p>
+          <p className="text-blue-200 text-xs">Vergleichsrechner für gemittelte Kostenanteile bei unterschiedlichen Betriebsstunden.</p>
         </div>
 
         <div className="flex flex-col lg:flex-row gap-5">
@@ -267,46 +299,66 @@ export default function RadiologySimulator() {
               <div className="text-[10px] text-gray-400 mb-2">{calc.coreHoursPerDay}h/Tag × {params.daysPerWeek} Tage = {calc.coreHoursPerWeek}h/Woche</div>
               <InputField label="Betriebstage/Woche" value={params.daysPerWeek} onChange={up("daysPerWeek")} suffix="Tage" min={1} />
               <InputField label="Betriebswochen/Jahr" value={params.weeksPerYear} onChange={up("weeksPerYear")} suffix="Wo" />
-              <InputField label="Scans pro Stunde" value={params.scansPerHour} onChange={up("scansPerHour")} suffix="Scans/h" step={0.5} />
-              <InputField label="Umsatz pro Scan" value={params.revenuePerScan} onChange={up("revenuePerScan")} suffix="€" />
             </div>
 
-            {/* Szenarien */}
-            <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-4">
-              <h2 className="text-xs font-semibold text-gray-700 mb-3 uppercase tracking-wide">Szenarien (Zusatzstunden/Wo)</h2>
-              <div className="bg-orange-50 border border-orange-200 rounded-lg p-3 mb-3">
-                <div className="text-[10px] font-semibold text-orange-600 mb-1">SZENARIO A — Ohne Zukauf</div>
-                <InputField label="Zusätzliche Stunden/Woche" value={params.scenarioA_extraHours} onChange={up("scenarioA_extraHours")} suffix="h" min={0} />
-                <div className="text-[10px] text-orange-500">Gesamt: {calc.scenA.totalHoursWeek} h/Wo</div>
+            {/* Szenario A */}
+            <div className="bg-white rounded-xl shadow-sm border border-orange-200 p-4">
+              <h2 className="text-xs font-semibold text-orange-600 mb-3 uppercase tracking-wide">Szenario A — Ohne Zukauf</h2>
+              <InputField label="Zusätzliche Stunden/Woche" value={params.scenarioA_extraHours} onChange={up("scenarioA_extraHours")} suffix="h" min={0} />
+              <InputField label="Untersuchungen pro Stunde" value={params.scenarioA_scansPerHour} onChange={up("scenarioA_scansPerHour")} suffix="U/h" step={0.5} min={0.5} />
+              <InputField label="Umsatz pro Untersuchung" value={params.scenarioA_revenuePerScan} onChange={up("scenarioA_revenuePerScan")} suffix="€" min={0} />
+              <div className="mt-2 pt-2 border-t border-orange-100 text-[10px] text-orange-500">
+                Gesamt: {calc.scenA.totalHoursWeek} h/Wo | {Math.round(calc.scenA.scansMonth)} Scans/Mo
               </div>
-              <div className="bg-blue-50 border border-blue-200 rounded-lg p-3">
-                <div className="text-[10px] font-semibold text-blue-600 mb-1">SZENARIO B — Mit Zukauf</div>
-                <InputField label="Zusätzliche Stunden/Woche" value={params.scenarioB_extraHours} onChange={up("scenarioB_extraHours")} suffix="h" min={0} />
-                <div className="text-[10px] text-blue-500">Gesamt: {calc.scenB.totalHoursWeek} h/Wo</div>
+            </div>
+
+            {/* Szenario B */}
+            <div className="bg-white rounded-xl shadow-sm border border-blue-200 p-4">
+              <h2 className="text-xs font-semibold text-blue-600 mb-3 uppercase tracking-wide">Szenario B — Mit Zukauf</h2>
+              <InputField label="Zusätzliche Stunden/Woche" value={params.scenarioB_extraHours} onChange={up("scenarioB_extraHours")} suffix="h" min={0} />
+              <InputField label="Untersuchungen pro Stunde" value={params.scenarioB_scansPerHour} onChange={up("scenarioB_scansPerHour")} suffix="U/h" step={0.5} min={0.5} />
+              <InputField label="Umsatz pro Untersuchung" value={params.scenarioB_revenuePerScan} onChange={up("scenarioB_revenuePerScan")} suffix="€" min={0} />
+              <InputField label="Fremdpersonal Kosten/Stunde" value={params.scenarioB_fremdpersonalPerHour} onChange={up("scenarioB_fremdpersonalPerHour")} suffix="€/h" min={0} />
+              <div className="mt-2 pt-2 border-t border-blue-100 text-[10px] text-blue-500">
+                Gesamt: {calc.scenB.totalHoursWeek} h/Wo | {Math.round(calc.scenB.scansMonth)} Scans/Mo
+              </div>
+              <div className="text-[10px] text-blue-400 mt-1">
+                Fremdpersonal: {fmt(calc.scenB.fremdpersonalCosts)}/Mo
               </div>
             </div>
           </div>
 
           {/* Right: Results */}
           <div className="flex-1 min-w-0">
-            {/* Tabs */}
-            <div className="flex gap-1 mb-4 bg-white rounded-lg p-1 border border-gray-200">
+            {/* Tabs + View Toggle */}
+            <div className="flex gap-1 mb-4 bg-white rounded-lg p-1 border border-gray-200 items-center">
               {tabs.map((t) => (
                 <button key={t.key} onClick={() => setActiveTab(t.key)}
                   className={`flex-1 px-3 py-2 rounded-md text-xs font-medium transition-colors ${activeTab === t.key ? "bg-blue-600 text-white" : "text-gray-600 hover:bg-gray-100"}`}>
                   {t.label}
                 </button>
               ))}
+              <div className="w-px h-6 bg-gray-200 mx-1" />
+              <div className="flex bg-gray-100 rounded-md p-0.5">
+                <button onClick={() => setViewMode("monthly")}
+                  className={`px-2 py-1.5 rounded text-[10px] font-medium transition-colors ${viewMode === "monthly" ? "bg-white text-blue-600 shadow-sm" : "text-gray-500"}`}>
+                  Monatlich
+                </button>
+                <button onClick={() => setViewMode("yearly")}
+                  className={`px-2 py-1.5 rounded text-[10px] font-medium transition-colors ${viewMode === "yearly" ? "bg-white text-blue-600 shadow-sm" : "text-gray-500"}`}>
+                  Jährlich
+                </button>
+              </div>
             </div>
 
             {/* TAB: Overview */}
             {activeTab === "overview" && (
               <div className="space-y-4">
                 <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-                  <KPI title="Scans / Monat" valueA={calc.scenA.scansMonth} valueB={calc.scenB.scansMonth} format="number" />
-                  <KPI title="Umsatz / Monat" valueA={calc.scenA.revenueMonth} valueB={calc.scenB.revenueMonth} />
-                  <KPI title="Kosten / Monat" valueA={calc.scenA.totalCostsMonth} valueB={calc.scenB.totalCostsMonth} />
-                  <KPI title="Deckungsbeitrag / Monat" valueA={calc.scenA.profitMonth} valueB={calc.scenB.profitMonth} highlight />
+                  <KPI title={`Scans / ${periodLabel}`} valueA={calc.scenA.scansMonth * periodMult} valueB={calc.scenB.scansMonth * periodMult} format="number" />
+                  <KPI title={`Umsatz / ${periodLabel}`} valueA={calc.scenA.revenueMonth * periodMult} valueB={calc.scenB.revenueMonth * periodMult} />
+                  <KPI title={`Kosten / ${periodLabel}`} valueA={calc.scenA.totalCostsMonth * periodMult} valueB={calc.scenB.totalCostsMonth * periodMult} />
+                  <KPI title={`Deckungsbeitrag / ${periodLabel}`} valueA={calc.scenA.profitMonth * periodMult} valueB={calc.scenB.profitMonth * periodMult} highlight />
                 </div>
 
                 <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
@@ -318,13 +370,13 @@ export default function RadiologySimulator() {
 
                 {/* Difference summary */}
                 <div className="bg-gradient-to-r from-indigo-50 to-purple-50 border border-indigo-200 rounded-xl p-4">
-                  <h3 className="text-xs font-semibold text-indigo-700 mb-2 uppercase">Differenz Szenario B vs. A (monatlich)</h3>
+                  <h3 className="text-xs font-semibold text-indigo-700 mb-2 uppercase">Differenz Szenario B vs. A ({isYearly ? "jährlich" : "monatlich"})</h3>
                   <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 text-sm">
                     {[
-                      { l: "Mehr Scans", v: calc.diff.scansMonth, f: "n" },
-                      { l: "Mehr Umsatz", v: calc.diff.revenueMonth, f: "c" },
-                      { l: "Mehr Kosten", v: calc.diff.costsMonth, f: "c" },
-                      { l: "Mehr DB", v: calc.diff.profitMonth, f: "c" },
+                      { l: "Mehr Scans", v: (isYearly ? calc.diff.scansYear : calc.diff.scansMonth), f: "n" },
+                      { l: "Mehr Umsatz", v: (isYearly ? calc.diff.revenueYear : calc.diff.revenueMonth), f: "c" },
+                      { l: "Mehr Kosten", v: (isYearly ? calc.diff.costsYear : calc.diff.costsMonth), f: "c" },
+                      { l: "Mehr DB", v: (isYearly ? calc.diff.profitYear : calc.diff.profitMonth), f: "c" },
                     ].map((d, i) => (
                       <div key={i}>
                         <div className="text-[10px] text-indigo-500">{d.l}</div>
@@ -334,9 +386,11 @@ export default function RadiologySimulator() {
                       </div>
                     ))}
                   </div>
-                  <div className="mt-2 pt-2 border-t border-indigo-200 text-xs text-indigo-600">
-                    Jahresdifferenz: Umsatz {fmt(calc.diff.revenueYear)} | DB {fmt(calc.diff.profitYear)}
-                  </div>
+                  {!isYearly && (
+                    <div className="mt-2 pt-2 border-t border-indigo-200 text-xs text-indigo-600">
+                      Jahresdifferenz: Umsatz {fmt(calc.diff.revenueYear)} | DB {fmt(calc.diff.profitYear)}
+                    </div>
+                  )}
                 </div>
 
                 {/* Comparison chart */}
@@ -372,9 +426,61 @@ export default function RadiologySimulator() {
                   </ResponsiveContainer>
                 </div>
 
+                {/* Monthly comparison table */}
+                <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-4">
+                  <h3 className="text-sm font-semibold text-gray-700 mb-3">Monatsaufstellung im Vergleich</h3>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-xs">
+                      <thead>
+                        <tr className="border-b-2 border-gray-200">
+                          <th className="py-2 px-2 text-left text-gray-600">Monat</th>
+                          <th className="py-2 px-2 text-right text-orange-600">Umsatz A</th>
+                          <th className="py-2 px-2 text-right text-blue-600">Umsatz B</th>
+                          <th className="py-2 px-2 text-right text-orange-600">Kosten A</th>
+                          <th className="py-2 px-2 text-right text-blue-600">Kosten B</th>
+                          <th className="py-2 px-2 text-right text-orange-600">DB A</th>
+                          <th className="py-2 px-2 text-right text-blue-600">DB B</th>
+                          <th className="py-2 px-2 text-right text-purple-600">Diff DB</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {calc.monthlyData.map((row, i) => {
+                          const diffDB = row.gewinnB - row.gewinnA;
+                          return (
+                            <tr key={i} className="border-b border-gray-100">
+                              <td className="py-1.5 px-2 font-medium">{row.monat}</td>
+                              <td className="py-1.5 px-2 text-right">{fmt(row.umsatzA)}</td>
+                              <td className="py-1.5 px-2 text-right">{fmt(row.umsatzB)}</td>
+                              <td className="py-1.5 px-2 text-right">{fmt(row.kostenA)}</td>
+                              <td className="py-1.5 px-2 text-right">{fmt(row.kostenB)}</td>
+                              <td className="py-1.5 px-2 text-right">{fmt(row.gewinnA)}</td>
+                              <td className="py-1.5 px-2 text-right">{fmt(row.gewinnB)}</td>
+                              <td className={`py-1.5 px-2 text-right font-medium ${diffDB >= 0 ? "text-green-600" : "text-red-600"}`}>
+                                {diffDB >= 0 ? "+" : ""}{fmt(diffDB)}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                        <tr className="border-t-2 border-gray-300 bg-gray-50 font-semibold">
+                          <td className="py-2 px-2">Gesamt</td>
+                          <td className="py-2 px-2 text-right">{fmt(calc.scenA.revenueYear)}</td>
+                          <td className="py-2 px-2 text-right">{fmt(calc.scenB.revenueYear)}</td>
+                          <td className="py-2 px-2 text-right">{fmt(calc.scenA.totalCostsYear)}</td>
+                          <td className="py-2 px-2 text-right">{fmt(calc.scenB.totalCostsYear)}</td>
+                          <td className="py-2 px-2 text-right">{fmt(calc.scenA.profitYear)}</td>
+                          <td className="py-2 px-2 text-right">{fmt(calc.scenB.profitYear)}</td>
+                          <td className={`py-2 px-2 text-right ${calc.diff.profitYear >= 0 ? "text-green-600" : "text-red-600"}`}>
+                            {calc.diff.profitYear >= 0 ? "+" : ""}{fmt(calc.diff.profitYear)}
+                          </td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
                 {/* Detail table */}
                 <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-4">
-                  <h3 className="text-sm font-semibold text-gray-700 mb-3">Detailvergleich</h3>
+                  <h3 className="text-sm font-semibold text-gray-700 mb-3">Detailvergleich ({isYearly ? "Jährlich" : "Monatlich"})</h3>
                   <div className="overflow-x-auto">
                     <table className="w-full text-sm">
                       <thead>
@@ -388,15 +494,16 @@ export default function RadiologySimulator() {
                       <tbody>
                         {[
                           { l: "Betriebsstunden / Woche", a: calc.scenA.totalHoursWeek, b: calc.scenB.totalHoursWeek, u: "h" },
-                          { l: "Scans / Monat", a: calc.scenA.scansMonth, b: calc.scenB.scansMonth, u: "" },
-                          { l: "Scans / Jahr", a: calc.scenA.scansYear, b: calc.scenB.scansYear, u: "" },
-                          { l: "Umsatz / Monat", a: calc.scenA.revenueMonth, b: calc.scenB.revenueMonth, u: "€", c: true },
-                          { l: "Umsatz / Jahr", a: calc.scenA.revenueYear, b: calc.scenB.revenueYear, u: "€", c: true },
-                          { l: "Kosten / Monat", a: calc.scenA.totalCostsMonth, b: calc.scenB.totalCostsMonth, u: "€", c: true },
+                          { l: `Scans / ${periodLabel}`, a: calc.scenA.scansMonth * periodMult, b: calc.scenB.scansMonth * periodMult, u: "" },
+                          { l: `Umsatz / ${periodLabel}`, a: calc.scenA.revenueMonth * periodMult, b: calc.scenB.revenueMonth * periodMult, u: "€", c: true },
+                          { l: `Kosten / ${periodLabel}`, a: calc.scenA.totalCostsMonth * periodMult, b: calc.scenB.totalCostsMonth * periodMult, u: "€", c: true },
                           { l: "Kostenquote gesamt", a: calc.scenA.costPct, b: calc.scenB.costPct, u: "%", p: true },
-                          { l: "Deckungsbeitrag / Monat", a: calc.scenA.profitMonth, b: calc.scenB.profitMonth, u: "€", c: true, bold: true },
-                          { l: "Deckungsbeitrag / Jahr", a: calc.scenA.profitYear, b: calc.scenB.profitYear, u: "€", c: true, bold: true },
+                          { l: `Deckungsbeitrag / ${periodLabel}`, a: calc.scenA.profitMonth * periodMult, b: calc.scenB.profitMonth * periodMult, u: "€", c: true, bold: true },
                           { l: "Marge", a: calc.scenA.margin, b: calc.scenB.margin, u: "%", p: true },
+                          { l: "Kosten / Scan", a: calc.scenA.costPerScan, b: calc.scenB.costPerScan, u: "€", c: true },
+                          { l: "DB / Scan", a: calc.scenA.profitPerScan, b: calc.scenB.profitPerScan, u: "€", c: true },
+                          { l: "DB / Stunde", a: calc.scenA.profitPerHour, b: calc.scenB.profitPerHour, u: "€", c: true },
+                          ...(calc.scenB.fremdpersonalCosts > 0 ? [{ l: `Fremdpersonal / ${periodLabel}`, a: 0, b: calc.scenB.fremdpersonalCosts * periodMult, u: "€", c: true }] : []),
                         ].map((row, i) => {
                           const d = row.b - row.a;
                           const fv = (v) => row.c ? fmt(v) : row.p ? `${(v*100).toFixed(1)}%` : `${Math.round(v).toLocaleString("de-AT")}${row.u ? " " + row.u : ""}`;
@@ -423,27 +530,34 @@ export default function RadiologySimulator() {
               <div className="space-y-4">
                 <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-4">
                   <h3 className="text-sm font-semibold text-gray-700 mb-1">Zentrale Kostenvariablen (% vom Umsatz)</h3>
-                  <p className="text-[10px] text-gray-400 mb-3">Diese Werte steuern die gesamte Berechnung. Änderungen wirken sich auf alle Szenarien aus.</p>
+                  <p className="text-[10px] text-gray-400 mb-1">Diese Werte steuern die gesamte Berechnung. Änderungen wirken sich auf alle Szenarien aus.</p>
+                  <p className="text-[10px] text-amber-500 mb-3"><span className="inline-block w-2 h-2 rounded-full bg-amber-500 mr-1" /> = In Szenario B nur auf Kernbetrieb-Umsatz berechnet (nicht auf Zusatzstunden)</p>
                   <div className="grid grid-cols-1 lg:grid-cols-2 gap-x-6">
                     {Object.entries(costLabels).map(([key, label]) => (
-                      <CostRow key={key} label={label} value={costs[key]} onChange={uc(key)} />
+                      <CostRow key={key} label={label} value={costs[key]} onChange={uc(key)} coreOnly={coreOnlyCosts.has(key)} />
                     ))}
                   </div>
-                  <div className="mt-3 pt-3 border-t border-gray-200 flex justify-between text-xs font-medium">
-                    <span>Gesamtkostenquote (mit Zukauf):</span>
-                    <span className="text-red-600">{Object.values(costs).reduce((s, v) => s + v, 0).toFixed(2)}%</span>
-                  </div>
-                  <div className="flex justify-between text-xs font-medium mt-1">
-                    <span>Gesamtkostenquote (ohne Zukauf):</span>
-                    <span className="text-orange-600">{(Object.values(costs).reduce((s, v) => s + v, 0) - costs.fremdpersonal).toFixed(2)}%</span>
+                  <div className="mt-3 pt-3 border-t border-gray-200">
+                    <div className="flex justify-between text-xs font-medium">
+                      <span>Gesamtkostenquote (Sz. A, % v. Umsatz):</span>
+                      <span className="text-orange-600">{Object.values(costs).reduce((s, v) => s + v, 0).toFixed(2)}%</span>
+                    </div>
+                    <div className="flex justify-between text-xs font-medium mt-1">
+                      <span>Effektive Kostenquote Sz. B:</span>
+                      <span className="text-blue-600">{calc.scenB.costPct.toFixed(2)}%</span>
+                    </div>
+                    <div className="flex justify-between text-xs text-gray-500 mt-2 pt-2 border-t border-gray-100">
+                      <span>Fremdpersonal ({params.scenarioB_fremdpersonalPerHour} €/h × {params.scenarioB_extraHours} Zusatz-h/Wo):</span>
+                      <span className="text-blue-600 font-medium">{fmt(calc.scenB.fremdpersonalCosts)}/Mo</span>
+                    </div>
                   </div>
                 </div>
 
                 {/* Cost breakdown chart */}
                 <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-4">
-                  <h3 className="text-sm font-semibold text-gray-700 mb-3">Kostenvergleich nach Kategorie (monatlich)</h3>
-                  <ResponsiveContainer width="100%" height={400}>
-                    <BarChart data={calc.costCompData} layout="vertical" margin={{ left: 20 }}>
+                  <h3 className="text-sm font-semibold text-gray-700 mb-3">Kostenvergleich nach Kategorie ({isYearly ? "jährlich" : "monatlich"})</h3>
+                  <ResponsiveContainer width="100%" height={420}>
+                    <BarChart data={calc.costCompData.map(d => isYearly ? { ...d, szenarioA: d.szenarioA * 12, szenarioB: d.szenarioB * 12 } : d)} layout="vertical" margin={{ left: 20 }}>
                       <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
                       <XAxis type="number" tickFormatter={fmtShort} tick={{ fontSize: 10 }} />
                       <YAxis type="category" dataKey="name" tick={{ fontSize: 10 }} width={140} />
@@ -479,9 +593,9 @@ export default function RadiologySimulator() {
                   <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-4">
                     <h3 className="text-sm font-semibold text-gray-700 mb-2">Kostenaufteilung Szenario A</h3>
                     <div className="space-y-1">
-                      {Object.entries(costLabels).filter(([k]) => k !== "fremdpersonal").map(([key, label]) => {
+                      {Object.entries(costLabels).map(([key, label]) => {
                         const val = calc.scenA.costBreakdown[key] || 0;
-                        const maxVal = Math.max(...Object.values(calc.scenA.costBreakdown));
+                        const maxVal = Math.max(...Object.entries(calc.scenA.costBreakdown).filter(([k]) => k !== "fremdpersonal").map(([,v]) => v));
                         const width = maxVal > 0 ? (val / maxVal) * 100 : 0;
                         return (
                           <div key={key} className="flex items-center gap-2 text-[10px]">
@@ -498,7 +612,7 @@ export default function RadiologySimulator() {
                   <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-4">
                     <h3 className="text-sm font-semibold text-gray-700 mb-2">Kostenaufteilung Szenario B</h3>
                     <div className="space-y-1">
-                      {Object.entries(costLabels).map(([key, label]) => {
+                      {[...Object.entries(costLabels), ["fremdpersonal", "Fremdpersonal (Zukauf)"]].map(([key, label]) => {
                         const val = calc.scenB.costBreakdown[key] || 0;
                         const maxVal = Math.max(...Object.values(calc.scenB.costBreakdown));
                         const width = maxVal > 0 ? (val / maxVal) * 100 : 0;
@@ -522,9 +636,9 @@ export default function RadiologySimulator() {
             {activeTab === "sensitivity" && (
               <div className="space-y-4">
                 <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-4">
-                  <h3 className="text-sm font-semibold text-gray-700 mb-3">Sensitivitätsanalyse: DB nach Zusatzstunden/Woche</h3>
+                  <h3 className="text-sm font-semibold text-gray-700 mb-3">Sensitivitätsanalyse: DB nach Zusatzstunden/Woche ({isYearly ? "jährlich" : "monatlich"})</h3>
                   <ResponsiveContainer width="100%" height={350}>
-                    <LineChart data={calc.sensitivityData}>
+                    <LineChart data={calc.sensitivityData.map(d => isYearly ? { ...d, gewinnMitZukauf: d.gewinnMitZukauf * 12, gewinnOhneZukauf: d.gewinnOhneZukauf * 12 } : d)}>
                       <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
                       <XAxis dataKey="extraStunden" tick={{ fontSize: 11 }} label={{ value: "Zusätzliche Stunden/Woche", position: "bottom", fontSize: 11, offset: -5 }} />
                       <YAxis tickFormatter={fmtShort} tick={{ fontSize: 11 }} />
@@ -538,7 +652,7 @@ export default function RadiologySimulator() {
                 </div>
 
                 <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-4">
-                  <h3 className="text-sm font-semibold text-gray-700 mb-3">Datentabelle</h3>
+                  <h3 className="text-sm font-semibold text-gray-700 mb-3">Datentabelle ({isYearly ? "Jährlich" : "Monatlich"})</h3>
                   <table className="w-full text-xs">
                     <thead>
                       <tr className="border-b-2 border-gray-200">
@@ -549,25 +663,28 @@ export default function RadiologySimulator() {
                       </tr>
                     </thead>
                     <tbody>
-                      {calc.sensitivityData.map((row, i) => (
-                        <tr key={i} className="border-b border-gray-100">
-                          <td className="py-1.5 px-2">{row.extraStunden} h</td>
-                          <td className="py-1.5 px-2 text-right">{fmt(row.gewinnOhneZukauf)}</td>
-                          <td className="py-1.5 px-2 text-right">{fmt(row.gewinnMitZukauf)}</td>
-                          <td className={`py-1.5 px-2 text-right font-medium ${row.gewinnMitZukauf - row.gewinnOhneZukauf >= 0 ? "text-green-600" : "text-red-600"}`}>
-                            {fmt(row.gewinnMitZukauf - row.gewinnOhneZukauf)}
-                          </td>
-                        </tr>
-                      ))}
+                      {calc.sensitivityData.map((row, i) => {
+                        const m = isYearly ? 12 : 1;
+                        return (
+                          <tr key={i} className="border-b border-gray-100">
+                            <td className="py-1.5 px-2">{row.extraStunden} h</td>
+                            <td className="py-1.5 px-2 text-right">{fmt(row.gewinnOhneZukauf * m)}</td>
+                            <td className="py-1.5 px-2 text-right">{fmt(row.gewinnMitZukauf * m)}</td>
+                            <td className={`py-1.5 px-2 text-right font-medium ${row.gewinnMitZukauf - row.gewinnOhneZukauf >= 0 ? "text-green-600" : "text-red-600"}`}>
+                              {fmt((row.gewinnMitZukauf - row.gewinnOhneZukauf) * m)}
+                            </td>
+                          </tr>
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>
               </div>
             )}
 
-            {/* Footer */}
-            <div className="mt-4 p-3 bg-amber-50 border border-amber-200 rounded-lg text-[10px] text-amber-700">
-              <strong>Hinweis:</strong> Dieser Rechner ist ein Vergleichsinstrument für gemittelte Kostenanteile bei unterschiedlichen Betriebsstunden. Er stellt nicht die tatsächliche Marge des Gesamtbetriebs dar, da Leasing-, Finanzierungs- und Zinsaufwendungen nicht berücksichtigt sind.
+            {/* Disclaimer */}
+            <div className="mt-4 p-3 bg-red-50 border border-red-200 rounded-lg text-[10px] text-red-700">
+              <strong>Disclaimer:</strong> Die in diesem Rechner verwendeten Daten basieren auf statistischen Durchschnittswerten und Annahmen. Sie treffen nicht notwendigerweise auf die Realität eines spezifischen Instituts oder Betriebs zu. Dieser Rechner dient ausschließlich als Vergleichsinstrument und stellt keine betriebswirtschaftliche Beratung dar. Leasing-, Finanzierungs- und Zinsaufwendungen sind nicht berücksichtigt.
             </div>
           </div>
         </div>
