@@ -304,13 +304,12 @@ export default function RadiologySimulator() {
           style={{ background: `linear-gradient(135deg, ${COLORS.dark} 0%, #1a1b2e 50%, ${COLORS.primaryDark}33 100%)` }}
         >
           <div className="relative z-10">
-            <div className="flex items-center gap-3 mb-2">
-              <div className="w-10 h-10 rounded-md flex items-center justify-center text-white font-bold text-lg" style={{ backgroundColor: COLORS.primary }}>
-                TS
-              </div>
+            <div className="flex items-center gap-4 mb-1">
+              <img src="/logo-white.png" alt="TheScan" className="h-10 object-contain" />
+              <div className="w-px h-8 bg-white/20" />
               <div>
-                <h1 className="text-xl font-bold text-white tracking-tight">TheScan Rechner</h1>
-                <p className="text-xs" style={{ color: `${COLORS.white}88` }}>Radiologie Scan-Simulator — Szenario-Vergleich</p>
+                <h1 className="text-lg font-bold text-white tracking-tight">Scan-Rechner</h1>
+                <p className="text-xs" style={{ color: `${COLORS.white}88` }}>Radiologie Szenario-Vergleich</p>
               </div>
             </div>
           </div>
