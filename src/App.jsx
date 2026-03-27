@@ -1,8 +1,11 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useRef, useCallback } from "react";
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
   ResponsiveContainer, Area, AreaChart, ReferenceLine, LineChart, Line
 } from "recharts";
+import jsPDF from "jspdf";
+import html2canvas from "html2canvas";
+import * as XLSX from "xlsx";
 
 /* ── thescan.at brand colors ── */
 const COLORS = {
@@ -198,6 +201,8 @@ export default function RadiologySimulator() {
 
   const isYearly = viewMode === "yearly";
   const periodLabel = isYearly ? "Jahr" : "Monat";
+  const printRef = useRef(null);
+  const [exporting, setExporting] = useState(false);
 
   const calc = useMemo(() => {
     const {
@@ -234,10 +239,11 @@ export default function RadiologySimulator() {
       // Apply monthly adjustment
       const adjFactor = 1 + (adjPct / 100);
 
-      // Apply core sick day reduction (affects core revenue)
-      const coreSickFactor = coreStandbyEnabled ? 1 : (1 - coreSickDayPct / 100);
-      // Apply scenario-specific sick day reduction (affects extra hours revenue)
-      const extraSickFactor = standbyEnabled ? 1 : (1 - sickDayPct / 100);
+      // Bereitschaft-Logik: Wenn Szenario-Bereitschaft aktiv → kein Krankenstand-Ausfall
+      // (weder im Kernbetrieb noch in den Zusatzstunden für dieses Szenario)
+      const hasStandby = standbyEnabled || coreStandbyEnabled;
+      const coreSickFactor = hasStandby ? 1 : (1 - coreSickDayPct / 100);
+      const extraSickFactor = hasStandby ? 1 : (1 - sickDayPct / 100);
 
       const adjCoreScans = (coreScansMonth * adjFactor) * coreSickFactor;
       const adjExtraScans = (extraScansMonth * adjFactor) * extraSickFactor;
@@ -425,20 +431,117 @@ export default function RadiologySimulator() {
         szenarioB: Math.round(scenB.costBreakdown[key] || 0),
       }));
 
+    // Pure core scenario (0 extra hours, no fremdpersonal)
+    const scenCore = calcFullScenario(0, 0, 0, 0, 0, false, 0);
+
     // Sensitivity
     const sensitivityData = Array.from({ length: 11 }, (_, i) => {
       const extra = i * 5;
-      const withFremd = calcFullScenario(extra, scenarioB_scansPerHour, scenarioB_revenuePerScan, true, scenarioB_sickDayPct, scenarioB_standbyEnabled, scenarioB_standbyCost);
-      const withoutFremd = calcFullScenario(extra, scenarioA_scansPerHour, scenarioA_revenuePerScan, false, scenarioA_sickDayPct, scenarioA_standbyEnabled, scenarioA_standbyCost);
+      const withFremd = calcFullScenario(extra, scenarioB_scansPerHour, scenarioB_revenuePerScan, scenarioB_fremdpersonalPerHour, scenarioB_sickDayPct, scenarioB_standbyEnabled, scenarioB_standbyCost);
+      const withoutFremd = calcFullScenario(extra, scenarioA_scansPerHour, scenarioA_revenuePerScan, scenarioA_fremdpersonalPerHour, scenarioA_sickDayPct, scenarioA_standbyEnabled, scenarioA_standbyCost);
       return {
         extraStunden: extra,
         gewinnMitZukauf: Math.round(withFremd.profitMonth),
         gewinnOhneZukauf: Math.round(withoutFremd.profitMonth),
+        gewinnKernbetrieb: Math.round(scenCore.profitMonth),
       };
     });
 
-    return { scenA, scenB, diff, monthlyData, costCompData, sensitivityData, coreHoursPerDay, coreHoursPerWeek, weeksPerMonth, allCostLabels };
+    return { scenA, scenB, scenCore, diff, monthlyData, costCompData, sensitivityData, coreHoursPerDay, coreHoursPerWeek, weeksPerMonth, allCostLabels };
   }, [params, costs, monthlyAdj]);
+
+  // ── PDF Export ──
+  const exportPDF = useCallback(async () => {
+    if (!printRef.current || exporting) return;
+    setExporting(true);
+    try {
+      const el = printRef.current;
+      // Temporarily expand for capture
+      const origOverflow = el.style.overflow;
+      el.style.overflow = "visible";
+
+      const canvas = await html2canvas(el, { scale: 1.5, useCORS: true, backgroundColor: "#F7F8FA", windowWidth: 1200 });
+      el.style.overflow = origOverflow;
+
+      const imgData = canvas.toDataURL("image/png");
+      const pdf = new jsPDF({ orientation: "landscape", unit: "mm", format: "a4" });
+      const pageW = pdf.internal.pageSize.getWidth();
+      const pageH = pdf.internal.pageSize.getHeight();
+      const margin = 10;
+      const usableW = pageW - margin * 2;
+      const imgW = canvas.width;
+      const imgH = canvas.height;
+      const ratio = usableW / imgW;
+      const scaledH = imgH * ratio;
+      const usableH = pageH - margin * 2;
+
+      let yOffset = 0;
+      let page = 0;
+      while (yOffset < scaledH) {
+        if (page > 0) pdf.addPage();
+        pdf.addImage(imgData, "PNG", margin, margin - yOffset, usableW, scaledH);
+        yOffset += usableH;
+        page++;
+      }
+
+      pdf.save("TheScan_Rechner_Export.pdf");
+    } catch (e) {
+      console.error("PDF Export failed:", e);
+    }
+    setExporting(false);
+  }, [exporting]);
+
+  // ── Excel Export ──
+  const exportExcel = useCallback(() => {
+    const wb = XLSX.utils.book_new();
+    const m = isYearly ? 12 : 1;
+    const pl = isYearly ? "Jahr" : "Monat";
+
+    // Sheet 1: Übersicht
+    const overviewData = [
+      ["TheScan Rechner — Szenario-Vergleich"],
+      [],
+      ["Kennzahl", "Kernbetrieb", "Szenario A", "Szenario B", "Diff A vs Kern", "Diff B vs Kern"],
+      [`Betriebsstunden / Woche`, calc.scenCore.totalHoursWeek, calc.scenA.totalHoursWeek, calc.scenB.totalHoursWeek, calc.scenA.totalHoursWeek - calc.scenCore.totalHoursWeek, calc.scenB.totalHoursWeek - calc.scenCore.totalHoursWeek],
+      [`Scans / ${pl}`, Math.round(calc.scenCore.scansMonth * m), Math.round((isYearly ? calc.scenA.scansYear : calc.scenA.scansMonth)), Math.round((isYearly ? calc.scenB.scansYear : calc.scenB.scansMonth))],
+      [`Umsatz / ${pl}`, Math.round(calc.scenCore.revenueMonth * m), Math.round(isYearly ? calc.scenA.revenueYear : calc.scenA.revenueMonth), Math.round(isYearly ? calc.scenB.revenueYear : calc.scenB.revenueMonth)],
+      [`Kosten / ${pl}`, Math.round(calc.scenCore.totalCostsMonth * m), Math.round(isYearly ? calc.scenA.totalCostsYear : calc.scenA.totalCostsMonth), Math.round(isYearly ? calc.scenB.totalCostsYear : calc.scenB.totalCostsMonth)],
+      [`DB / ${pl}`, Math.round(calc.scenCore.profitMonth * m), Math.round(isYearly ? calc.scenA.profitYear : calc.scenA.profitMonth), Math.round(isYearly ? calc.scenB.profitYear : calc.scenB.profitMonth)],
+      ["Marge", `${(calc.scenCore.margin * 100).toFixed(1)}%`, `${(calc.scenA.margin * 100).toFixed(1)}%`, `${(calc.scenB.margin * 100).toFixed(1)}%`],
+      ["Kostenquote", `${calc.scenCore.costPct.toFixed(1)}%`, `${calc.scenA.costPct.toFixed(1)}%`, `${calc.scenB.costPct.toFixed(1)}%`],
+      ["Kosten / Scan", Math.round(calc.scenCore.costPerScan), Math.round(calc.scenA.costPerScan), Math.round(calc.scenB.costPerScan)],
+      ["DB / Scan", Math.round(calc.scenCore.profitPerScan), Math.round(calc.scenA.profitPerScan), Math.round(calc.scenB.profitPerScan)],
+      ["DB / Stunde", Math.round(calc.scenCore.profitPerHour), Math.round(calc.scenA.profitPerHour), Math.round(calc.scenB.profitPerHour)],
+    ];
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(overviewData), "Übersicht");
+
+    // Sheet 2: Monatsvergleich
+    const monthlyHeader = ["Monat", "Umsatz A", "Umsatz B", "Kosten A", "Kosten B", "DB A", "DB B", "Diff DB"];
+    const monthlyRows = calc.monthlyData.map((r) => [r.monat, r.umsatzA, r.umsatzB, r.kostenA, r.kostenB, r.gewinnA, r.gewinnB, r.gewinnB - r.gewinnA]);
+    const totalRow = ["Gesamt",
+      Math.round(calc.scenA.revenueYear), Math.round(calc.scenB.revenueYear),
+      Math.round(calc.scenA.totalCostsYear), Math.round(calc.scenB.totalCostsYear),
+      Math.round(calc.scenA.profitYear), Math.round(calc.scenB.profitYear),
+      Math.round(calc.diff.profitYear)
+    ];
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([monthlyHeader, ...monthlyRows, totalRow]), "Monatsvergleich");
+
+    // Sheet 3: Kostenstruktur
+    const costHeader = ["Kostenstelle", "% vom Umsatz", "Sz. A (∅/Mo)", "Sz. B (∅/Mo)"];
+    const costRows = calc.costCompData.map((r) => [r.fullName, "", r.szenarioA, r.szenarioB]);
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([costHeader, ...costRows]), "Kostenstruktur");
+
+    // Sheet 4: Sensitivität
+    const sensHeader = ["Extra h/Wo", "DB Kernbetrieb", "DB Sz. A", "DB Sz. B", "Diff A vs Kern", "Diff B vs Kern"];
+    const sensRows = calc.sensitivityData.map((r) => {
+      const mult = isYearly ? 12 : 1;
+      return [r.extraStunden, r.gewinnKernbetrieb * mult, r.gewinnOhneZukauf * mult, r.gewinnMitZukauf * mult,
+        (r.gewinnOhneZukauf - r.gewinnKernbetrieb) * mult, (r.gewinnMitZukauf - r.gewinnKernbetrieb) * mult];
+    });
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([sensHeader, ...sensRows]), "Sensitivität");
+
+    XLSX.writeFile(wb, "TheScan_Rechner_Export.xlsx");
+  }, [calc, isYearly]);
 
   const tabs = [
     { key: "overview", label: "Übersicht" },
@@ -457,7 +560,7 @@ export default function RadiologySimulator() {
           className="rounded-md p-6 mb-5 relative overflow-hidden"
           style={{ background: `linear-gradient(135deg, ${COLORS.dark} 0%, #1a1b2e 50%, ${COLORS.primaryDark}33 100%)` }}
         >
-          <div className="relative z-10">
+          <div className="relative z-10 flex items-center justify-between">
             <div className="flex items-center gap-4 mb-1">
               <img src="/logo-white.png" alt="TheScan" className="h-10 object-contain" />
               <div className="w-px h-8 bg-white/20" />
@@ -466,11 +569,28 @@ export default function RadiologySimulator() {
                 <p className="text-xs" style={{ color: `${COLORS.white}88` }}>Radiologie Szenario-Vergleich</p>
               </div>
             </div>
+            <div className="flex gap-2">
+              <button
+                onClick={exportPDF}
+                disabled={exporting}
+                className="px-3 py-1.5 rounded-md text-xs font-semibold transition-all hover:opacity-80"
+                style={{ backgroundColor: `${COLORS.white}20`, color: COLORS.white, border: `1px solid ${COLORS.white}33` }}
+              >
+                {exporting ? "Export…" : "PDF Export"}
+              </button>
+              <button
+                onClick={exportExcel}
+                className="px-3 py-1.5 rounded-md text-xs font-semibold transition-all hover:opacity-80"
+                style={{ backgroundColor: `${COLORS.teal}33`, color: COLORS.white, border: `1px solid ${COLORS.teal}55` }}
+              >
+                Excel Export
+              </button>
+            </div>
           </div>
           <div className="absolute top-0 right-0 w-64 h-full opacity-10" style={{ background: `radial-gradient(circle at 80% 50%, ${COLORS.primary}, transparent 70%)` }} />
         </div>
 
-        <div className="flex flex-col lg:flex-row gap-5">
+        <div ref={printRef} className="flex flex-col lg:flex-row gap-5">
           {/* ═══════ LEFT SIDEBAR: Inputs ═══════ */}
           <div className="lg:w-80 flex-shrink-0 space-y-4">
 
@@ -698,18 +818,21 @@ export default function RadiologySimulator() {
                   </h3>
                   <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 text-sm">
                     {[
-                      { l: "Mehr Scans", v: isYearly ? calc.diff.scansYear : calc.diff.scansMonth, f: "n" },
-                      { l: "Mehr Umsatz", v: isYearly ? calc.diff.revenueYear : calc.diff.revenueMonth, f: "c" },
-                      { l: "Mehr Kosten", v: isYearly ? calc.diff.costsYear : calc.diff.costsMonth, f: "c" },
-                      { l: "Mehr DB", v: isYearly ? calc.diff.profitYear : calc.diff.profitMonth, f: "c" },
-                    ].map((d, i) => (
-                      <div key={i}>
-                        <div className="text-[10px] font-semibold" style={{ color: COLORS.grayBlue }}>{d.l}</div>
-                        <div className="font-bold" style={{ color: d.v >= 0 ? COLORS.teal : COLORS.red }}>
-                          {d.v >= 0 ? "+" : ""}{d.f === "c" ? fmt(d.v) : Math.round(d.v).toLocaleString("de-AT")}
+                      { l: "Mehr Scans", v: isYearly ? calc.diff.scansYear : calc.diff.scansMonth, f: "n", dc: "up" },
+                      { l: "Mehr Umsatz", v: isYearly ? calc.diff.revenueYear : calc.diff.revenueMonth, f: "c", dc: "up" },
+                      { l: "Mehr Kosten", v: isYearly ? calc.diff.costsYear : calc.diff.costsMonth, f: "c", dc: "neutral" },
+                      { l: "Mehr DB", v: isYearly ? calc.diff.profitYear : calc.diff.profitMonth, f: "c", dc: "up" },
+                    ].map((d, i) => {
+                      const color = d.dc === "neutral" ? COLORS.dark : (d.v >= 0 ? COLORS.teal : COLORS.red);
+                      return (
+                        <div key={i}>
+                          <div className="text-[10px] font-semibold" style={{ color: COLORS.grayBlue }}>{d.l}</div>
+                          <div className="font-bold" style={{ color }}>
+                            {d.v >= 0 ? "+" : ""}{d.f === "c" ? fmt(d.v) : Math.round(d.v).toLocaleString("de-AT")}
+                          </div>
                         </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 </div>
 
@@ -997,41 +1120,106 @@ export default function RadiologySimulator() {
                     Sensitivität: DB nach Zusatzstunden ({isYearly ? "jährlich" : "∅ monatlich"})
                   </h3>
                   <ResponsiveContainer width="100%" height={350}>
-                    <LineChart data={calc.sensitivityData.map(d => isYearly ? { ...d, gewinnMitZukauf: d.gewinnMitZukauf * 12, gewinnOhneZukauf: d.gewinnOhneZukauf * 12 } : d)}>
+                    <LineChart data={calc.sensitivityData.map(d => isYearly ? { ...d, gewinnMitZukauf: d.gewinnMitZukauf * 12, gewinnOhneZukauf: d.gewinnOhneZukauf * 12, gewinnKernbetrieb: d.gewinnKernbetrieb * 12 } : d)}>
                       <CartesianGrid strokeDasharray="3 3" stroke={`${COLORS.cardBorder}88`} />
                       <XAxis dataKey="extraStunden" tick={{ fontSize: 11, fill: COLORS.grayBlue }} label={{ value: "Zusätzliche h/Woche", position: "bottom", fontSize: 11, fill: COLORS.grayBlue, offset: -5 }} />
                       <YAxis tickFormatter={fmtShort} tick={{ fontSize: 11, fill: COLORS.grayBlue }} />
                       <Tooltip formatter={(v) => fmt(v)} contentStyle={{ borderRadius: 6, border: `1px solid ${COLORS.cardBorder}` }} />
                       <Legend wrapperStyle={{ fontSize: 11 }} />
-                      <Line type="monotone" dataKey="gewinnOhneZukauf" name="DB ohne Zukauf" stroke={COLORS.scenarioA} strokeWidth={2.5} dot={{ r: 4, fill: COLORS.scenarioA }} />
-                      <Line type="monotone" dataKey="gewinnMitZukauf" name="DB mit Zukauf" stroke={COLORS.scenarioB} strokeWidth={2.5} dot={{ r: 4, fill: COLORS.scenarioB }} />
+                      <Line type="monotone" dataKey="gewinnKernbetrieb" name="DB Kernbetrieb (pur)" stroke={COLORS.grayBlue} strokeWidth={2} strokeDasharray="8 4" dot={false} />
+                      <Line type="monotone" dataKey="gewinnOhneZukauf" name="DB Szenario A" stroke={COLORS.scenarioA} strokeWidth={2.5} dot={{ r: 4, fill: COLORS.scenarioA }} />
+                      <Line type="monotone" dataKey="gewinnMitZukauf" name="DB Szenario B" stroke={COLORS.scenarioB} strokeWidth={2.5} dot={{ r: 4, fill: COLORS.scenarioB }} />
                       <ReferenceLine y={0} stroke={COLORS.grayBlue} strokeDasharray="3 3" />
                     </LineChart>
                   </ResponsiveContainer>
                 </Card>
 
+                {/* Comparison: Core vs A vs B */}
                 <Card>
-                  <h3 className="text-sm font-bold mb-3" style={{ color: COLORS.dark }}>Datentabelle ({isYearly ? "Jährlich" : "∅ Monatlich"})</h3>
+                  <h3 className="text-sm font-bold mb-3" style={{ color: COLORS.dark }}>Vergleich: Kernbetrieb vs. Szenario A vs. Szenario B ({isYearly ? "Jährlich" : "∅ Monatlich"})</h3>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-xs">
+                      <thead>
+                        <tr style={{ borderBottom: `2px solid ${COLORS.cardBorder}` }}>
+                          <th className="py-2 px-2 text-left" style={{ color: COLORS.grayBlue }}>Kennzahl</th>
+                          <th className="py-2 px-2 text-right" style={{ color: COLORS.grayBlue }}>Kernbetrieb</th>
+                          <th className="py-2 px-2 text-right" style={{ color: COLORS.scenarioA }}>Szenario A</th>
+                          <th className="py-2 px-2 text-right" style={{ color: COLORS.teal }}>Diff A vs. Kern</th>
+                          <th className="py-2 px-2 text-right" style={{ color: COLORS.scenarioB }}>Szenario B</th>
+                          <th className="py-2 px-2 text-right" style={{ color: COLORS.teal }}>Diff B vs. Kern</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {(() => {
+                          const m = isYearly ? 12 : 1;
+                          const rows = [
+                            { l: "Betriebsstunden / Woche", k: calc.scenCore.totalHoursWeek, a: calc.scenA.totalHoursWeek, b: calc.scenB.totalHoursWeek, u: "h", dc: "up" },
+                            { l: `Scans / ${periodLabel}`, k: calc.scenCore.scansMonth * m, a: (isYearly ? calc.scenA.scansYear : calc.scenA.scansMonth), b: (isYearly ? calc.scenB.scansYear : calc.scenB.scansMonth), dc: "up" },
+                            { l: `Umsatz / ${periodLabel}`, k: calc.scenCore.revenueMonth * m, a: (isYearly ? calc.scenA.revenueYear : calc.scenA.revenueMonth), b: (isYearly ? calc.scenB.revenueYear : calc.scenB.revenueMonth), c: true, dc: "up" },
+                            { l: `Kosten / ${periodLabel}`, k: calc.scenCore.totalCostsMonth * m, a: (isYearly ? calc.scenA.totalCostsYear : calc.scenA.totalCostsMonth), b: (isYearly ? calc.scenB.totalCostsYear : calc.scenB.totalCostsMonth), c: true, dc: "neutral" },
+                            { l: "Kostenquote", k: calc.scenCore.costPct / 100, a: calc.scenA.costPct / 100, b: calc.scenB.costPct / 100, p: true, dc: "down" },
+                            { l: `DB / ${periodLabel}`, k: calc.scenCore.profitMonth * m, a: (isYearly ? calc.scenA.profitYear : calc.scenA.profitMonth), b: (isYearly ? calc.scenB.profitYear : calc.scenB.profitMonth), c: true, dc: "up", bold: true },
+                            { l: "Marge", k: calc.scenCore.margin, a: calc.scenA.margin, b: calc.scenB.margin, p: true, dc: "up" },
+                            { l: "Kosten / Scan", k: calc.scenCore.costPerScan, a: calc.scenA.costPerScan, b: calc.scenB.costPerScan, c: true, dc: "down" },
+                            { l: "DB / Scan", k: calc.scenCore.profitPerScan, a: calc.scenA.profitPerScan, b: calc.scenB.profitPerScan, c: true, dc: "up" },
+                            { l: "DB / Stunde", k: calc.scenCore.profitPerHour, a: calc.scenA.profitPerHour, b: calc.scenB.profitPerHour, c: true, dc: "up" },
+                          ];
+                          const fv = (row, v) => row.c ? fmt(v) : row.p ? pct(v) : `${Math.round(v).toLocaleString("de-AT")}${row.u ? " " + row.u : ""}`;
+                          const diffCol = (row, d) => row.dc === "neutral" ? COLORS.dark : row.dc === "up" ? (d >= 0 ? COLORS.teal : COLORS.red) : (d <= 0 ? COLORS.teal : COLORS.red);
+                          return rows.map((row, i) => {
+                            const dA = row.a - row.k;
+                            const dB = row.b - row.k;
+                            return (
+                              <tr key={i} style={{ borderBottom: `1px solid ${COLORS.cardBorder}66`, backgroundColor: row.bold ? `${COLORS.teal}08` : "transparent" }}>
+                                <td className={`py-1.5 px-2 ${row.bold ? "font-bold" : ""}`} style={{ color: COLORS.dark }}>{row.l}</td>
+                                <td className="py-1.5 px-2 text-right" style={{ color: COLORS.grayBlue }}>{fv(row, row.k)}</td>
+                                <td className="py-1.5 px-2 text-right">{fv(row, row.a)}</td>
+                                <td className="py-1.5 px-2 text-right font-semibold" style={{ color: diffCol(row, dA) }}>
+                                  {dA >= 0 ? "+" : ""}{fv(row, dA)}
+                                </td>
+                                <td className="py-1.5 px-2 text-right">{fv(row, row.b)}</td>
+                                <td className="py-1.5 px-2 text-right font-semibold" style={{ color: diffCol(row, dB) }}>
+                                  {dB >= 0 ? "+" : ""}{fv(row, dB)}
+                                </td>
+                              </tr>
+                            );
+                          });
+                        })()}
+                      </tbody>
+                    </table>
+                  </div>
+                </Card>
+
+                {/* Sensitivity data table */}
+                <Card>
+                  <h3 className="text-sm font-bold mb-3" style={{ color: COLORS.dark }}>Sensitivitätsdaten ({isYearly ? "Jährlich" : "∅ Monatlich"})</h3>
                   <table className="w-full text-xs">
                     <thead>
                       <tr style={{ borderBottom: `2px solid ${COLORS.cardBorder}` }}>
                         <th className="py-2 px-2 text-left" style={{ color: COLORS.grayBlue }}>Extra h/Wo</th>
-                        <th className="py-2 px-2 text-right" style={{ color: COLORS.scenarioA }}>DB ohne Zukauf</th>
-                        <th className="py-2 px-2 text-right" style={{ color: COLORS.scenarioB }}>DB mit Zukauf</th>
-                        <th className="py-2 px-2 text-right" style={{ color: COLORS.teal }}>Differenz</th>
+                        <th className="py-2 px-2 text-right" style={{ color: COLORS.grayBlue }}>DB Kern</th>
+                        <th className="py-2 px-2 text-right" style={{ color: COLORS.scenarioA }}>DB Sz. A</th>
+                        <th className="py-2 px-2 text-right" style={{ color: COLORS.scenarioB }}>DB Sz. B</th>
+                        <th className="py-2 px-2 text-right" style={{ color: COLORS.teal }}>Diff A vs. Kern</th>
+                        <th className="py-2 px-2 text-right" style={{ color: COLORS.teal }}>Diff B vs. Kern</th>
                       </tr>
                     </thead>
                     <tbody>
                       {calc.sensitivityData.map((row, i) => {
                         const m = isYearly ? 12 : 1;
-                        const d = row.gewinnMitZukauf - row.gewinnOhneZukauf;
+                        const dA = row.gewinnOhneZukauf - row.gewinnKernbetrieb;
+                        const dB = row.gewinnMitZukauf - row.gewinnKernbetrieb;
                         return (
                           <tr key={i} style={{ borderBottom: `1px solid ${COLORS.cardBorder}66` }}>
                             <td className="py-1.5 px-2 font-medium" style={{ color: COLORS.dark }}>{row.extraStunden} h</td>
+                            <td className="py-1.5 px-2 text-right" style={{ color: COLORS.grayBlue }}>{fmt(row.gewinnKernbetrieb * m)}</td>
                             <td className="py-1.5 px-2 text-right">{fmt(row.gewinnOhneZukauf * m)}</td>
                             <td className="py-1.5 px-2 text-right">{fmt(row.gewinnMitZukauf * m)}</td>
-                            <td className="py-1.5 px-2 text-right font-semibold" style={{ color: d >= 0 ? COLORS.teal : COLORS.red }}>
-                              {fmt(d * m)}
+                            <td className="py-1.5 px-2 text-right font-semibold" style={{ color: dA >= 0 ? COLORS.teal : COLORS.red }}>
+                              {dA >= 0 ? "+" : ""}{fmt(dA * m)}
+                            </td>
+                            <td className="py-1.5 px-2 text-right font-semibold" style={{ color: dB >= 0 ? COLORS.teal : COLORS.red }}>
+                              {dB >= 0 ? "+" : ""}{fmt(dB * m)}
                             </td>
                           </tr>
                         );
