@@ -70,6 +70,9 @@ const defaultParams = {
   weeksPerYear: 48,
   coreScansPerHour: 5,
   coreRevenuePerScan: 170,
+  coreSickDayPct: 0,
+  coreStandbyEnabled: false,
+  coreStandbyCost: 2000,
   // Scenario A
   scenarioA_extraHours: 0,
   scenarioA_scansPerHour: 5,
@@ -196,6 +199,7 @@ export default function RadiologySimulator() {
     const {
       operatingStart, operatingEnd, daysPerWeek, weeksPerYear,
       coreScansPerHour, coreRevenuePerScan,
+      coreSickDayPct, coreStandbyEnabled, coreStandbyCost,
       scenarioA_extraHours, scenarioA_scansPerHour, scenarioA_revenuePerScan,
       scenarioA_sickDayPct, scenarioA_standbyEnabled, scenarioA_standbyCost,
       scenarioB_extraHours, scenarioB_scansPerHour, scenarioB_revenuePerScan,
@@ -228,12 +232,17 @@ export default function RadiologySimulator() {
       const adjCoreRevenue = coreRevenueBase * adjFactor;
       const adjTotalRevenue = baseRevenue * adjFactor;
 
-      // Apply sick day reduction (revenue loss)
-      // If standby is enabled, sick days are covered → no revenue loss
-      const sickFactor = standbyEnabled ? 1 : (1 - sickDayPct / 100);
-      const finalScans = adjScans * sickFactor;
-      const finalCoreRevenue = adjCoreRevenue * sickFactor;
-      const finalTotalRevenue = adjTotalRevenue * sickFactor;
+      // Apply core sick day reduction (affects core revenue)
+      const coreSickFactor = coreStandbyEnabled ? 1 : (1 - coreSickDayPct / 100);
+      // Apply scenario-specific sick day reduction (affects extra hours revenue)
+      const extraSickFactor = standbyEnabled ? 1 : (1 - sickDayPct / 100);
+
+      const adjCoreScans = (coreScansMonth * adjFactor) * coreSickFactor;
+      const adjExtraScans = (extraScansMonth * adjFactor) * extraSickFactor;
+      const finalScans = adjCoreScans + adjExtraScans;
+      const finalCoreRevenue = adjCoreRevenue * coreSickFactor;
+      const finalExtraRevenue = (extraRevenueBase * adjFactor) * extraSickFactor;
+      const finalTotalRevenue = finalCoreRevenue + finalExtraRevenue;
 
       // Calculate costs based on revenue
       const costBreakdown = {};
@@ -259,24 +268,27 @@ export default function RadiologySimulator() {
       }
       costBreakdown.fremdpersonal = fremdpersonalCosts;
 
-      // Standby costs
+      // Standby costs (core + scenario-specific)
       let standbyMonthlyCost = 0;
-      if (standbyEnabled) {
-        standbyMonthlyCost = standbyCost;
-        totalCosts += standbyMonthlyCost;
+      if (coreStandbyEnabled) {
+        standbyMonthlyCost += coreStandbyCost;
       }
+      if (standbyEnabled) {
+        standbyMonthlyCost += standbyCost;
+      }
+      totalCosts += standbyMonthlyCost;
       costBreakdown.standby = standbyMonthlyCost;
 
-      // Sick day revenue loss (for display, even if covered by standby)
-      const sickDayLoss = adjTotalRevenue * (sickDayPct / 100);
+      // Sick day revenue loss (for display)
+      const sickDayLoss = adjCoreRevenue * (coreSickDayPct / 100) + (extraRevenueBase * adjFactor) * (sickDayPct / 100);
 
       const profit = finalTotalRevenue - totalCosts;
       const margin = finalTotalRevenue > 0 ? profit / finalTotalRevenue : 0;
 
       return {
         coreHoursMonth, extraHoursMonth, totalHoursMonth,
-        coreScansMonth: coreScansMonth * adjFactor * sickFactor,
-        extraScansMonth: extraScansMonth * adjFactor * sickFactor,
+        coreScansMonth: adjCoreScans,
+        extraScansMonth: adjExtraScans,
         totalScans: finalScans,
         coreRevenue: finalCoreRevenue,
         extraRevenue: finalTotalRevenue - finalCoreRevenue,
@@ -475,6 +487,23 @@ export default function RadiologySimulator() {
               <div className="pt-2 mt-2" style={{ borderTop: `1px solid ${COLORS.cardBorder}` }}>
                 <InputField label="Untersuchungen / Stunde (Kern)" value={params.coreScansPerHour} onChange={up("coreScansPerHour")} suffix="U/h" step={0.5} min={0.5} />
                 <InputField label="Umsatz / Untersuchung (Kern)" value={params.coreRevenuePerScan} onChange={up("coreRevenuePerScan")} suffix="€" min={0} />
+              </div>
+              <div className="pt-2 mt-2" style={{ borderTop: `1px solid ${COLORS.cardBorder}` }}>
+                <InputField label="Krankenstand-Ausfallquote (Kern)" value={params.coreSickDayPct} onChange={up("coreSickDayPct")} suffix="%" step={0.5} min={0} />
+                <Toggle
+                  label="Bereitschaft Kernbetrieb"
+                  checked={params.coreStandbyEnabled}
+                  onChange={up("coreStandbyEnabled")}
+                  color={COLORS.teal}
+                />
+                {params.coreStandbyEnabled && (
+                  <InputField label="Bereitschaftskosten / Monat (Kern)" value={params.coreStandbyCost} onChange={up("coreStandbyCost")} suffix="€/Mo" min={0} />
+                )}
+                {params.coreStandbyEnabled && params.coreSickDayPct > 0 && (
+                  <div className="text-[10px] px-2 py-1.5 rounded" style={{ backgroundColor: `${COLORS.teal}10`, color: COLORS.teal }}>
+                    ✓ Bereitschaft deckt {params.coreSickDayPct}% Krankenstand im Kernbetrieb ab
+                  </div>
+                )}
               </div>
             </Card>
 
@@ -771,19 +800,23 @@ export default function RadiologySimulator() {
                       </thead>
                       <tbody>
                         {[
-                          { l: "Betriebsstunden / Woche", a: calc.scenA.totalHoursWeek, b: calc.scenB.totalHoursWeek, u: "h" },
-                          { l: `Scans / ${periodLabel}`, a: isYearly ? calc.scenA.scansYear : calc.scenA.scansMonth, b: isYearly ? calc.scenB.scansYear : calc.scenB.scansMonth },
-                          { l: `Umsatz / ${periodLabel}`, a: isYearly ? calc.scenA.revenueYear : calc.scenA.revenueMonth, b: isYearly ? calc.scenB.revenueYear : calc.scenB.revenueMonth, c: true },
-                          { l: `Kosten / ${periodLabel}`, a: isYearly ? calc.scenA.totalCostsYear : calc.scenA.totalCostsMonth, b: isYearly ? calc.scenB.totalCostsYear : calc.scenB.totalCostsMonth, c: true },
-                          { l: "Kostenquote", a: calc.scenA.costPct / 100, b: calc.scenB.costPct / 100, p: true },
-                          { l: `DB / ${periodLabel}`, a: isYearly ? calc.scenA.profitYear : calc.scenA.profitMonth, b: isYearly ? calc.scenB.profitYear : calc.scenB.profitMonth, c: true, bold: true },
-                          { l: "Marge", a: calc.scenA.margin, b: calc.scenB.margin, p: true },
-                          { l: "Kosten / Scan", a: calc.scenA.costPerScan, b: calc.scenB.costPerScan, c: true },
-                          { l: "DB / Scan", a: calc.scenA.profitPerScan, b: calc.scenB.profitPerScan, c: true },
-                          { l: "DB / Stunde", a: calc.scenA.profitPerHour, b: calc.scenB.profitPerHour, c: true },
+                          // diffColor: "up" = higher is better (green if +), "down" = lower is better (green if -), "neutral" = always black
+                          { l: "Betriebsstunden / Woche", a: calc.scenA.totalHoursWeek, b: calc.scenB.totalHoursWeek, u: "h", dc: "up" },
+                          { l: `Scans / ${periodLabel}`, a: isYearly ? calc.scenA.scansYear : calc.scenA.scansMonth, b: isYearly ? calc.scenB.scansYear : calc.scenB.scansMonth, dc: "up" },
+                          { l: `Umsatz / ${periodLabel}`, a: isYearly ? calc.scenA.revenueYear : calc.scenA.revenueMonth, b: isYearly ? calc.scenB.revenueYear : calc.scenB.revenueMonth, c: true, dc: "up" },
+                          { l: `Kosten / ${periodLabel}`, a: isYearly ? calc.scenA.totalCostsYear : calc.scenA.totalCostsMonth, b: isYearly ? calc.scenB.totalCostsYear : calc.scenB.totalCostsMonth, c: true, dc: "neutral" },
+                          { l: "Kostenquote", a: calc.scenA.costPct / 100, b: calc.scenB.costPct / 100, p: true, dc: "down" },
+                          { l: `DB / ${periodLabel}`, a: isYearly ? calc.scenA.profitYear : calc.scenA.profitMonth, b: isYearly ? calc.scenB.profitYear : calc.scenB.profitMonth, c: true, bold: true, dc: "up" },
+                          { l: "Marge", a: calc.scenA.margin, b: calc.scenB.margin, p: true, dc: "up" },
+                          { l: "Kosten / Scan", a: calc.scenA.costPerScan, b: calc.scenB.costPerScan, c: true, dc: "down" },
+                          { l: "DB / Scan", a: calc.scenA.profitPerScan, b: calc.scenB.profitPerScan, c: true, dc: "up" },
+                          { l: "DB / Stunde", a: calc.scenA.profitPerHour, b: calc.scenB.profitPerHour, c: true, dc: "up" },
                         ].map((row, i) => {
                           const d = row.b - row.a;
                           const fv = (v) => row.c ? fmt(v) : row.p ? pct(v) : `${Math.round(v).toLocaleString("de-AT")}${row.u ? " " + row.u : ""}`;
+                          const diffColor = row.dc === "neutral" ? COLORS.dark
+                            : row.dc === "up" ? (d >= 0 ? COLORS.teal : COLORS.red)
+                            : (d <= 0 ? COLORS.teal : COLORS.red);
                           return (
                             <tr key={i} style={{
                               borderBottom: `1px solid ${COLORS.cardBorder}66`,
@@ -792,7 +825,7 @@ export default function RadiologySimulator() {
                               <td className={`py-1.5 px-2 text-xs ${row.bold ? "font-bold" : ""}`} style={{ color: COLORS.dark }}>{row.l}</td>
                               <td className="py-1.5 px-2 text-right text-xs">{fv(row.a)}</td>
                               <td className="py-1.5 px-2 text-right text-xs">{fv(row.b)}</td>
-                              <td className="py-1.5 px-2 text-right text-xs font-semibold" style={{ color: d >= 0 ? COLORS.teal : COLORS.red }}>
+                              <td className="py-1.5 px-2 text-right text-xs font-semibold" style={{ color: diffColor }}>
                                 {d >= 0 ? "+" : ""}{fv(d)}
                               </td>
                             </tr>
