@@ -73,10 +73,14 @@ const defaultParams = {
   coreSickDayPct: 0,
   coreStandbyEnabled: false,
   coreStandbyCost: 2000,
+  // Stammpersonal: pro Zusatzstunde X Stunden Stammpersonal-Einsatz
+  stammpersonalBruttoPerHour: 35,
+  stammpersonalFaktor: 2,
   // Scenario A
   scenarioA_extraHours: 0,
   scenarioA_scansPerHour: 5,
   scenarioA_revenuePerScan: 170,
+  scenarioA_fremdpersonalPerHour: 0,
   scenarioA_sickDayPct: 0,
   scenarioA_standbyEnabled: false,
   scenarioA_standbyCost: 2000,
@@ -200,7 +204,9 @@ export default function RadiologySimulator() {
       operatingStart, operatingEnd, daysPerWeek, weeksPerYear,
       coreScansPerHour, coreRevenuePerScan,
       coreSickDayPct, coreStandbyEnabled, coreStandbyCost,
+      stammpersonalBruttoPerHour, stammpersonalFaktor,
       scenarioA_extraHours, scenarioA_scansPerHour, scenarioA_revenuePerScan,
+      scenarioA_fremdpersonalPerHour,
       scenarioA_sickDayPct, scenarioA_standbyEnabled, scenarioA_standbyCost,
       scenarioB_extraHours, scenarioB_scansPerHour, scenarioB_revenuePerScan,
       scenarioB_fremdpersonalPerHour,
@@ -211,8 +217,9 @@ export default function RadiologySimulator() {
     const coreHoursPerWeek = coreHoursPerDay * daysPerWeek;
     const weeksPerMonth = weeksPerYear / 12;
 
-    // Calculate one month for a scenario, with optional monthly adjustment %
-    const calcMonth = (extraHoursPerWeek, extraScansPerHour, extraRevenuePerScan, isScenarioB, adjPct, sickDayPct, standbyEnabled, standbyCost) => {
+    // Calculate one month for a scenario
+    // fremdpersonalRate: €/h for external staff (both scenarios can have this)
+    const calcMonth = (extraHoursPerWeek, extraScansPerHour, extraRevenuePerScan, fremdpersonalRate, adjPct, sickDayPct, standbyEnabled, standbyCost) => {
       const coreHoursMonth = coreHoursPerWeek * weeksPerMonth;
       const extraHoursMonth = extraHoursPerWeek * weeksPerMonth;
       const totalHoursMonth = coreHoursMonth + extraHoursMonth;
@@ -220,17 +227,12 @@ export default function RadiologySimulator() {
       // Base scans & revenue (before adjustment)
       const coreScansMonth = coreHoursMonth * coreScansPerHour;
       const extraScansMonth = extraHoursMonth * extraScansPerHour;
-      const baseTotalScans = coreScansMonth + extraScansMonth;
 
       const coreRevenueBase = coreScansMonth * coreRevenuePerScan;
       const extraRevenueBase = extraScansMonth * extraRevenuePerScan;
-      const baseRevenue = coreRevenueBase + extraRevenueBase;
 
       // Apply monthly adjustment
       const adjFactor = 1 + (adjPct / 100);
-      const adjScans = baseTotalScans * adjFactor;
-      const adjCoreRevenue = coreRevenueBase * adjFactor;
-      const adjTotalRevenue = baseRevenue * adjFactor;
 
       // Apply core sick day reduction (affects core revenue)
       const coreSickFactor = coreStandbyEnabled ? 1 : (1 - coreSickDayPct / 100);
@@ -240,18 +242,19 @@ export default function RadiologySimulator() {
       const adjCoreScans = (coreScansMonth * adjFactor) * coreSickFactor;
       const adjExtraScans = (extraScansMonth * adjFactor) * extraSickFactor;
       const finalScans = adjCoreScans + adjExtraScans;
-      const finalCoreRevenue = adjCoreRevenue * coreSickFactor;
+      const finalCoreRevenue = (coreRevenueBase * adjFactor) * coreSickFactor;
       const finalExtraRevenue = (extraRevenueBase * adjFactor) * extraSickFactor;
       const finalTotalRevenue = finalCoreRevenue + finalExtraRevenue;
 
       // Calculate costs based on revenue
+      // coreOnlyCosts apply to BOTH scenarios: these % only scale with core revenue
       const costBreakdown = {};
       let totalCosts = 0;
 
       for (const [key, pctVal] of Object.entries(costs)) {
         let val;
-        if (isScenarioB && coreOnlyCosts.has(key)) {
-          // These costs only scale with core revenue
+        if (coreOnlyCosts.has(key)) {
+          // These costs only scale with core revenue (both scenarios)
           val = finalCoreRevenue * (pctVal / 100);
         } else {
           val = finalTotalRevenue * (pctVal / 100);
@@ -260,13 +263,21 @@ export default function RadiologySimulator() {
         totalCosts += val;
       }
 
-      // Fremdpersonal costs (Scenario B only)
+      // Fremdpersonal costs (both scenarios, based on their own rate)
       let fremdpersonalCosts = 0;
-      if (isScenarioB) {
-        fremdpersonalCosts = extraHoursMonth * scenarioB_fremdpersonalPerHour;
+      if (fremdpersonalRate > 0 && extraHoursMonth > 0) {
+        fremdpersonalCosts = extraHoursMonth * fremdpersonalRate;
         totalCosts += fremdpersonalCosts;
       }
       costBreakdown.fremdpersonal = fremdpersonalCosts;
+
+      // Stammpersonal: pro Zusatzstunde fallen X Stunden Stammpersonal-Einsatz an
+      let stammpersonalCosts = 0;
+      if (extraHoursMonth > 0 && stammpersonalFaktor > 0 && stammpersonalBruttoPerHour > 0) {
+        stammpersonalCosts = extraHoursMonth * stammpersonalFaktor * stammpersonalBruttoPerHour;
+        totalCosts += stammpersonalCosts;
+      }
+      costBreakdown.stammpersonal = stammpersonalCosts;
 
       // Standby costs (core + scenario-specific)
       let standbyMonthlyCost = 0;
@@ -280,7 +291,7 @@ export default function RadiologySimulator() {
       costBreakdown.standby = standbyMonthlyCost;
 
       // Sick day revenue loss (for display)
-      const sickDayLoss = adjCoreRevenue * (coreSickDayPct / 100) + (extraRevenueBase * adjFactor) * (sickDayPct / 100);
+      const sickDayLoss = (coreRevenueBase * adjFactor) * (coreSickDayPct / 100) + (extraRevenueBase * adjFactor) * (sickDayPct / 100);
 
       const profit = finalTotalRevenue - totalCosts;
       const margin = finalTotalRevenue > 0 ? profit / finalTotalRevenue : 0;
@@ -291,18 +302,18 @@ export default function RadiologySimulator() {
         extraScansMonth: adjExtraScans,
         totalScans: finalScans,
         coreRevenue: finalCoreRevenue,
-        extraRevenue: finalTotalRevenue - finalCoreRevenue,
+        extraRevenue: finalExtraRevenue,
         totalRevenue: finalTotalRevenue,
-        totalCosts, costBreakdown, fremdpersonalCosts, standbyMonthlyCost,
+        totalCosts, costBreakdown, fremdpersonalCosts, stammpersonalCosts, standbyMonthlyCost,
         sickDayLoss, sickDayPctApplied: standbyEnabled ? 0 : sickDayPct,
         profit, margin,
       };
     };
 
     // Calculate full scenario (12 months with individual adjustments)
-    const calcFullScenario = (extraHours, extraScans, extraRev, isB, sickPct, standbyOn, standbyCostVal) => {
+    const calcFullScenario = (extraHours, extraScans, extraRev, fremdRate, sickPct, standbyOn, standbyCostVal) => {
       const months = monthNames.map((name, i) => {
-        const m = calcMonth(extraHours, extraScans, extraRev, isB, monthlyAdj[i], sickPct, standbyOn, standbyCostVal);
+        const m = calcMonth(extraHours, extraScans, extraRev, fremdRate, monthlyAdj[i], sickPct, standbyOn, standbyCostVal);
         return { ...m, monat: name, monthIndex: i };
       });
 
@@ -318,6 +329,7 @@ export default function RadiologySimulator() {
         profit: avgField("profit"),
         coreRevenue: avgField("coreRevenue"),
         fremdpersonalCosts: avgField("fremdpersonalCosts"),
+        stammpersonalCosts: avgField("stammpersonalCosts"),
         standbyMonthlyCost: avgField("standbyMonthlyCost"),
         sickDayLoss: avgField("sickDayLoss"),
       };
@@ -338,7 +350,7 @@ export default function RadiologySimulator() {
 
       // Aggregate cost breakdown (average month)
       const costBreakdown = {};
-      const allKeys = [...Object.keys(costLabels), "fremdpersonal", "standby"];
+      const allKeys = [...Object.keys(costLabels), "fremdpersonal", "stammpersonal", "standby"];
       for (const key of allKeys) {
         costBreakdown[key] = months.reduce((s, m) => s + (m.costBreakdown[key] || 0), 0) / 12;
       }
@@ -363,11 +375,11 @@ export default function RadiologySimulator() {
 
     const scenA = calcFullScenario(
       scenarioA_extraHours, scenarioA_scansPerHour, scenarioA_revenuePerScan,
-      false, scenarioA_sickDayPct, scenarioA_standbyEnabled, scenarioA_standbyCost
+      scenarioA_fremdpersonalPerHour, scenarioA_sickDayPct, scenarioA_standbyEnabled, scenarioA_standbyCost
     );
     const scenB = calcFullScenario(
       scenarioB_extraHours, scenarioB_scansPerHour, scenarioB_revenuePerScan,
-      true, scenarioB_sickDayPct, scenarioB_standbyEnabled, scenarioB_standbyCost
+      scenarioB_fremdpersonalPerHour, scenarioB_sickDayPct, scenarioB_standbyEnabled, scenarioB_standbyCost
     );
 
     const diff = {
@@ -402,8 +414,8 @@ export default function RadiologySimulator() {
     });
 
     // Cost comparison
-    const allCostKeys = [...Object.keys(costLabels), "fremdpersonal", "standby"];
-    const allCostLabels = { ...costLabels, fremdpersonal: "Fremdpersonal (Zukauf)", standby: "Bereitschaft" };
+    const allCostKeys = [...Object.keys(costLabels), "fremdpersonal", "stammpersonal", "standby"];
+    const allCostLabels = { ...costLabels, fremdpersonal: "Fremdpersonal (Zukauf)", stammpersonal: "Stammpersonal (Zusatzstunden)", standby: "Bereitschaft" };
     const costCompData = allCostKeys
       .filter((key) => (scenA.costBreakdown[key] || 0) > 0 || (scenB.costBreakdown[key] || 0) > 0)
       .map((key) => ({
@@ -569,6 +581,7 @@ export default function RadiologySimulator() {
               <InputField label="Zusätzliche Stunden / Woche" value={params.scenarioA_extraHours} onChange={up("scenarioA_extraHours")} suffix="h" min={0} />
               <InputField label="Untersuchungen / Stunde (Zusatz)" value={params.scenarioA_scansPerHour} onChange={up("scenarioA_scansPerHour")} suffix="U/h" step={0.5} min={0.5} />
               <InputField label="Umsatz / Untersuchung (Zusatz)" value={params.scenarioA_revenuePerScan} onChange={up("scenarioA_revenuePerScan")} suffix="€" min={0} />
+              <InputField label="Fremdpersonal Kosten / Stunde" value={params.scenarioA_fremdpersonalPerHour} onChange={up("scenarioA_fremdpersonalPerHour")} suffix="€/h" min={0} />
 
               <div className="mt-3 pt-3" style={{ borderTop: `1px solid ${COLORS.scenarioA}22` }}>
                 <InputField label="Krankenstand-Ausfallquote" value={params.scenarioA_sickDayPct} onChange={up("scenarioA_sickDayPct")} suffix="%" step={0.5} min={0} />
@@ -846,7 +859,7 @@ export default function RadiologySimulator() {
                   <p className="text-[10px] mb-1" style={{ color: COLORS.grayBlue }}>Änderungen wirken sich auf beide Szenarien aus.</p>
                   <p className="text-[10px] mb-3" style={{ color: COLORS.orange }}>
                     <span className="inline-block w-2 h-2 rounded-full mr-1" style={{ backgroundColor: COLORS.orange }} />
-                    = In Szenario B nur auf Kernbetrieb-Umsatz berechnet
+                    = In beiden Szenarien nur auf Kernbetrieb-Umsatz berechnet (nicht auf Zusatzstunden-Umsatz)
                   </p>
                   <div className="grid grid-cols-1 lg:grid-cols-2 gap-x-6">
                     {Object.entries(costLabels).map(([key, label]) => (
@@ -866,6 +879,20 @@ export default function RadiologySimulator() {
                       <span style={{ color: COLORS.grayBlue }}>Effektive Kostenquote Sz. B:</span>
                       <span style={{ color: COLORS.scenarioB }}>{calc.scenB.costPct.toFixed(2)}%</span>
                     </div>
+                  </div>
+                </Card>
+
+                <Card>
+                  <h3 className="text-xs font-bold uppercase tracking-wider mb-3" style={{ color: COLORS.dark }}>Stammpersonal-Kosten (Zusatzstunden)</h3>
+                  <p className="text-[10px] mb-3" style={{ color: COLORS.grayBlue }}>
+                    Pro Zusatzstunde fallen zusätzliche Stammpersonal-Einsatzstunden an (z.B. Einweisung, Aufsicht, Dokumentation).
+                  </p>
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-x-6">
+                    <InputField label="Stammpersonal Brutto / Stunde" value={params.stammpersonalBruttoPerHour} onChange={up("stammpersonalBruttoPerHour")} suffix="€/h" min={0} step={1} />
+                    <InputField label="Stammpersonal-Faktor (h pro Zusatzstunde)" value={params.stammpersonalFaktor} onChange={up("stammpersonalFaktor")} suffix="×" min={0} step={0.5} />
+                  </div>
+                  <div className="text-[10px] mt-1" style={{ color: COLORS.grayBlue }}>
+                    Berechnung: Zusatzstunden × {params.stammpersonalFaktor} × {fmt(params.stammpersonalBruttoPerHour)} = {fmt(params.stammpersonalFaktor * params.stammpersonalBruttoPerHour)} pro Zusatzstunde
                   </div>
                 </Card>
 
